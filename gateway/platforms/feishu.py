@@ -1219,6 +1219,7 @@ class FeishuAdapter(BasePlatformAdapter):
             .register_p2_card_action_trigger(self._on_card_action_trigger)
             .register_p2_im_chat_member_bot_added_v1(self._on_bot_added_to_chat)
             .register_p2_im_chat_member_bot_deleted_v1(self._on_bot_removed_from_chat)
+            .register_p2_im_chat_access_event_bot_p2p_chat_entered_v1(self._on_bot_p2p_chat_entered)
             .build()
         )
 
@@ -1819,6 +1820,12 @@ class FeishuAdapter(BasePlatformAdapter):
         chat_id = str(getattr(event, "chat_id", "") or "")
         logger.info("[Feishu] Bot removed from chat: %s", chat_id)
         self._chat_info_cache.pop(chat_id, None)
+
+    def _on_bot_p2p_chat_entered(self, data: Any) -> None:
+        """Handle bot entering a P2P chat (user opens a private chat with the bot)."""
+        event = getattr(data, "event", None)
+        chat_id = str(getattr(event, "chat_id", "") or "")
+        logger.debug("[Feishu] Bot P2P chat entered: %s", chat_id)
 
     def _on_reaction_event(self, event_type: str, data: Any) -> None:
         """Route user reactions on bot messages as synthetic text events."""
