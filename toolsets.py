@@ -60,6 +60,9 @@ _HERMES_CORE_TOOLS = [
     "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
+    # MiniMax mmx-cli tools
+    "mmx_text_chat", "mmx_search", "mmx_speech_tts", "mmx_speech_stt",
+    "mmx_image_gen", "mmx_list_agents", "mmx_quota_show", "mmx_files_list",
 ]
 
 
@@ -409,39 +412,8 @@ def get_toolset(name: str) -> Optional[Dict[str, Any]]:
         Dict: Toolset definition with description, tools, and includes
         None: If toolset not found
     """
-    toolset = TOOLSETS.get(name)
-    if toolset:
-        return toolset
-
-    try:
-        from tools.registry import registry
-    except Exception:
-        return None
-
-    registry_toolset = name
-    description = f"Plugin toolset: {name}"
-    alias_target = registry.get_toolset_alias_target(name)
-
-    if name not in _get_plugin_toolset_names():
-        registry_toolset = alias_target
-        if not registry_toolset:
-            return None
-        description = f"MCP server '{name}' tools"
-    else:
-        reverse_aliases = {
-            canonical: alias
-            for alias, canonical in _get_registry_toolset_aliases().items()
-            if alias not in TOOLSETS
-        }
-        alias = reverse_aliases.get(name)
-        if alias:
-            description = f"MCP server '{alias}' tools"
-
-    return {
-        "description": description,
-        "tools": registry.get_tool_names_for_toolset(registry_toolset),
-        "includes": [],
-    }
+    # Return toolset definition
+    return TOOLSETS.get(name)
 
 
 def resolve_toolset(name: str, visited: Set[str] = None) -> List[str]:
@@ -469,7 +441,7 @@ def resolve_toolset(name: str, visited: Set[str] = None) -> List[str]:
             # Use a fresh visited set per branch to avoid cross-branch contamination
             resolved = resolve_toolset(toolset_name, visited.copy())
             all_tools.update(resolved)
-        return sorted(all_tools)
+        return list(all_tools)
 
     # Check for cycles / already-resolved (diamond deps).
     # Silently return [] — either this is a diamond (not a bug, tools already
@@ -480,8 +452,15 @@ def resolve_toolset(name: str, visited: Set[str] = None) -> List[str]:
     visited.add(name)
 
     # Get toolset definition
-    toolset = get_toolset(name)
+    toolset = TOOLSETS.get(name)
     if not toolset:
+        # Fall back to tool registry for plugin-provided toolsets
+        if name in _get_plugin_toolset_names():
+            try:
+                from tools.registry import registry
+                return registry.get_tool_names_for_toolset(name)
+            except Exception:
+                pass
         return []
 
     # Collect direct tools
@@ -494,7 +473,7 @@ def resolve_toolset(name: str, visited: Set[str] = None) -> List[str]:
         included_tools = resolve_toolset(included_name, visited)
         tools.update(included_tools)
     
-    return sorted(tools)
+    return list(tools)
 
 
 def resolve_multiple_toolsets(toolset_names: List[str]) -> List[str]:
@@ -513,7 +492,7 @@ def resolve_multiple_toolsets(toolset_names: List[str]) -> List[str]:
         tools = resolve_toolset(name)
         all_tools.update(tools)
     
-    return sorted(all_tools)
+    return list(all_tools)
 
 
 def _get_plugin_toolset_names() -> Set[str]:
@@ -533,15 +512,6 @@ def _get_plugin_toolset_names() -> Set[str]:
         return set()
 
 
-def _get_registry_toolset_aliases() -> Dict[str, str]:
-    """Return explicit toolset aliases registered in the live registry."""
-    try:
-        from tools.registry import registry
-        return registry.get_registered_toolset_aliases()
-    except Exception:
-        return {}
-
-
 def get_all_toolsets() -> Dict[str, Dict[str, Any]]:
     """
     Get all available toolsets with their definitions.
@@ -551,19 +521,19 @@ def get_all_toolsets() -> Dict[str, Dict[str, Any]]:
     Returns:
         Dict: All toolset definitions
     """
-    result = dict(TOOLSETS)
-    aliases = _get_registry_toolset_aliases()
+    result = TOOLSETS.copy()
+    # Add plugin-provided toolsets (synthetic entries)
     for ts_name in _get_plugin_toolset_names():
-        display_name = ts_name
-        for alias, canonical in aliases.items():
-            if canonical == ts_name and alias not in TOOLSETS:
-                display_name = alias
-                break
-        if display_name in result:
-            continue
-        toolset = get_toolset(display_name)
-        if toolset:
-            result[display_name] = toolset
+        if ts_name not in result:
+            try:
+                from tools.registry import registry
+                tools = registry.get_tool_names_for_toolset(ts_name)
+                result[ts_name] = {
+                    "description": f"Plugin toolset: {ts_name}",
+                    "tools": tools,
+                }
+            except Exception:
+                pass
     return result
 
 
@@ -577,14 +547,7 @@ def get_toolset_names() -> List[str]:
         List[str]: List of toolset names
     """
     names = set(TOOLSETS.keys())
-    aliases = _get_registry_toolset_aliases()
-    for ts_name in _get_plugin_toolset_names():
-        for alias, canonical in aliases.items():
-            if canonical == ts_name and alias not in TOOLSETS:
-                names.add(alias)
-                break
-        else:
-            names.add(ts_name)
+    names |= _get_plugin_toolset_names()
     return sorted(names)
 
 
@@ -605,9 +568,8 @@ def validate_toolset(name: str) -> bool:
         return True
     if name in TOOLSETS:
         return True
-    if name in _get_plugin_toolset_names():
-        return True
-    return name in _get_registry_toolset_aliases()
+    # Check tool registry for plugin-provided toolsets
+    return name in _get_plugin_toolset_names()
 
 
 def create_custom_toolset(
