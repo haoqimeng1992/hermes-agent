@@ -1001,6 +1001,19 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         # Phase 3: Generate structured summary
         summary = self._generate_summary(turns_to_summarize, focus_topic=focus_topic)
 
+        # PRESERVE-ON-FAILURE: if summarization failed, keep all original messages
+        # intact rather than deleting the middle turns and leaving only a failure
+        # marker.  This is the "preserve-on-failure" principle: if compression
+        # fails, nothing is removed.
+        if summary is None:
+            if not self.quiet_mode:
+                logger.warning(
+                    "Context compression skipped — summary generation failed. "
+                    "All %d original messages preserved.",
+                    n_messages,
+                )
+            return messages
+
         # Phase 4: Assemble compressed message list
         compressed = []
         for i in range(compress_start):
