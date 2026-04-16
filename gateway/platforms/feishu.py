@@ -1219,7 +1219,9 @@ class FeishuAdapter(BasePlatformAdapter):
             .register_p2_card_action_trigger(self._on_card_action_trigger)
             .register_p2_im_chat_member_bot_added_v1(self._on_bot_added_to_chat)
             .register_p2_im_chat_member_bot_deleted_v1(self._on_bot_removed_from_chat)
-            .register_p2_im_chat_access_event_bot_p2p_chat_entered_v1(self._on_bot_p2p_chat_entered)
+            .register_p2_im_chat_access_event_bot_p2p_chat_entered_v1(
+                lambda data: None  # No-op: suppress "processor not found" error log spam
+            )
             .build()
         )
 

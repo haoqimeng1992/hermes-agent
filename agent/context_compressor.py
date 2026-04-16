@@ -1100,16 +1100,29 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         # If LLM summary failed, insert a static fallback so the model
         # knows context was lost rather than silently dropping everything.
         if not summary:
+            # PRESERVE-ON-FAILURE: keep all original middle messages intact
+            # rather than deleting them. This prevents the double-loss bug where
+            # tool output is pruned AND then messages are deleted on summarization failure.
             if not self.quiet_mode:
-                logger.warning("Summary generation failed — inserting static fallback context marker")
-            n_dropped = compress_end - compress_start
-            summary = (
-                f"{SUMMARY_PREFIX}\n"
-                f"Summary generation was unavailable. {n_dropped} conversation turns were "
-                f"removed to free context space but could not be summarized. The removed "
-                f"turns contained earlier work in this session. Continue based on the "
-                f"recent messages below and the current state of any files or resources."
-            )
+                n_dropped = compress_end - compress_start
+                logger.warning(
+                    "Context compression skipped — summary generation failed. "
+                    "All %d original messages preserved.",
+                    n_dropped,
+                )
+            # Append middle messages as-is
+            for i in range(compress_start, compress_end):
+                compressed.append(messages[i].copy())
+            # Append tail
+            for i in range(compress_end, n_messages):
+                compressed.append(messages[i].copy())
+            self.compression_count += 1
+            compressed = self._sanitize_tool_pairs(compressed)
+            if not self.quiet_mode:
+                new_estimate = estimate_messages_tokens_rough(compressed)
+                logger.info("Compression-failure fallback: kept %d original messages, "
+                            "~%d tokens", len(compressed), new_estimate)
+            return compressed
 
         _merge_summary_into_tail = False
         last_head_role = messages[compress_start - 1].get("role", "user") if compress_start > 0 else "user"
@@ -1130,7 +1143,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                 # Both roles would create consecutive same-role messages
                 # (e.g. head=assistant, tail=user — neither role works).
                 # Merge the summary into the first tail message instead
-                # of inserting a standalone message that breaks alternation.
+                # of inserting a standalone message that breaks alternation."
                 _merge_summary_into_tail = True
         if not _merge_summary_into_tail:
             compressed.append({"role": summary_role, "content": summary})
