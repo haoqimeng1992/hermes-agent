@@ -2075,21 +2075,23 @@ def _resolve_task_provider_model(
     resolved_api_mode = cfg_api_mode
 
     if base_url:
-        return "custom", resolved_model, base_url, api_key, resolved_api_mode
+        resolved_api_key = api_key or cfg_api_key or os.environ.get(f"{provider.upper().replace('-', '_')}_API_KEY", "") if provider else api_key
+        return "custom", resolved_model, base_url, resolved_api_key, resolved_api_mode
     if provider:
         return provider, resolved_model, base_url, api_key, resolved_api_mode
 
     if task:
         # Config.yaml is the primary source for per-task overrides.
         if cfg_base_url:
-            return "custom", resolved_model, cfg_base_url, cfg_api_key, resolved_api_mode
+            # Fall back to environment variable if cfg_api_key is empty.
+            resolved_key = cfg_api_key or os.environ.get(f"{cfg_provider.upper().replace('-', '_')}_API_KEY", "") if cfg_provider else cfg_api_key
+            return "custom", resolved_model, cfg_base_url, resolved_key, resolved_api_mode
         if cfg_provider and cfg_provider != "auto":
             return cfg_provider, resolved_model, None, None, resolved_api_mode
 
         return "auto", resolved_model, None, None, resolved_api_mode
 
     return "auto", resolved_model, None, None, resolved_api_mode
-
 
 _DEFAULT_AUX_TIMEOUT = 30.0
 

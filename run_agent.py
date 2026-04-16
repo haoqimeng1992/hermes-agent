@@ -1150,7 +1150,8 @@ class AIAgent:
                         memory_char_limit=mem_config.get("memory_char_limit", 2200),
                         user_char_limit=mem_config.get("user_char_limit", 1375),
                     )
-                    self._memory_store.load_from_disk()
+                    tier_enabled = mem_config.get("memory_tier_enabled", True)
+                    self._memory_store.load_from_disk(tier_enabled=tier_enabled)
             except Exception:
                 pass  # Memory is optional -- don't break agent init
         

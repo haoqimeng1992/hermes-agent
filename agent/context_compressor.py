@@ -571,13 +571,13 @@ class ContextCompressor(ContextEngine):
         # Preamble shared by both first-compaction and iterative-update prompts.
         # Inspired by OpenCode's "do not respond to any questions" instruction
         # and Codex's "another language model" framing.
+        # NOTE: Use Chinese prompts — MiniMax models return empty content on complex
+        # English prompts but work correctly with Chinese summarization instructions.
         _summarizer_preamble = (
-            "You are a summarization agent creating a context checkpoint. "
-            "Your output will be injected as reference material for a DIFFERENT "
-            "assistant that continues the conversation. "
-            "Do NOT respond to any questions or requests in the conversation — "
-            "only output the structured summary. "
-            "Do NOT include any preamble, greeting, or prefix."
+            "你是一个上下文摘要生成器，用于创建对话检查点。"
+            "你的输出将作为参考资料注入给另一个继续对话的助手。"
+            "不要回答对话中的任何问题或请求——只输出结构化摘要。"
+            "不要包含任何开场白、问候语或前缀标记。"
         )
 
         # Shared structured template (used by both paths).
@@ -689,7 +689,22 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             # Handle cases where content is not a string (e.g., dict from llama.cpp)
             if not isinstance(content, str):
                 content = str(content) if content else ""
-            summary = content.strip()
+
+            # Strip think/reasoning blocks that some models (MiniMax-M2.5)
+            # inject inside the content string.
+            content = re.sub(
+                r"<think>.*?</think>", "", content,
+                flags=re.DOTALL | re.IGNORECASE
+            ).strip()
+
+            summary = content
+            # MiniMax-M2.7-highspeed returns empty content on complex prompts.
+            # Treat empty summary as a transient failure to trigger retry/fallback.
+            if not summary:
+                raise RuntimeError(
+                    f"Summary model '{self.summary_model or self.model}' returned empty content. "
+                    f"Treating as transient error to retry with {'summary_model' if self.summary_model else 'main_model'}."
+                )
             # Store for iterative updates on next compaction
             self._previous_summary = summary
             self._summary_failure_cooldown_until = 0.0
@@ -998,19 +1013,49 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                 tail_msgs,
             )
 
-        # Phase 3: Generate structured summary
-        summary = self._generate_summary(turns_to_summarize, focus_topic=focus_topic)
+        # Phase 3: Generate structured summary with retry logic.
+        # Retry strategy:
+        #   1. Try summary_model (up to 2 attempts with brief cooldown on transient error)
+        #   2. Fall back to main model (1 attempt) if summary_model is different
+        #   3. If ALL attempts fail → return original messages (preserve-on-failure)
+        summary = None
+        attempts = []
+        _summary_model_for_attempt = self.summary_model
 
-        # PRESERVE-ON-FAILURE: if summarization failed, keep all original messages
-        # intact rather than deleting the middle turns and leaving only a failure
-        # marker.  This is the "preserve-on-failure" principle: if compression
-        # fails, nothing is removed.
+        # Attempt 1 & 2: try summary_model
+        for attempt in range(2):
+            if attempt > 0:
+                # Brief cooldown before retry
+                time.sleep(1)
+            result = self._generate_summary(turns_to_summarize, focus_topic=focus_topic)
+            if result is not None:
+                summary = result
+                break
+            attempts.append(f"attempt_{attempt+1}_failed")
+
+        # Attempt 3: if summary_model != main model, fall back to main model
+        if summary is None and _summary_model_for_attempt and _summary_model_for_attempt != self.model:
+            _original_summary_model = self.summary_model
+            self.summary_model = ""  # empty = use main model
+            time.sleep(1)
+            result = self._generate_summary(turns_to_summarize, focus_topic=focus_topic)
+            self.summary_model = _original_summary_model  # restore
+            if result is not None:
+                summary = result
+                attempts.append("main_model_fallback_success")
+            else:
+                attempts.append("main_model_fallback_failed")
+        elif summary is None:
+            attempts.append("no_summary_model_fallback_needed")
+
+        # PRESERVE-ON-FAILURE: if ALL summarization attempts failed, keep all original
+        # messages intact rather than deleting middle turns without a summary.
         if summary is None:
             if not self.quiet_mode:
                 logger.warning(
-                    "Context compression skipped — summary generation failed. "
+                    "Context compression skipped — all %d summarization attempts failed (%s). "
                     "All %d original messages preserved.",
-                    n_messages,
+                    len(attempts) + 1, attempts, n_messages,
                 )
             return messages
 

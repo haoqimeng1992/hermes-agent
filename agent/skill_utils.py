@@ -426,6 +426,23 @@ def extract_skill_description(frontmatter: Dict[str, Any]) -> str:
     return desc
 
 
+def get_skill_usage_stats() -> dict:
+    """从learnings.json获取技能使用频率，返回top技能名列表"""
+    try:
+        import json
+        f = Path.home() / ".hermes" / "learnings.json"
+        if f.exists():
+            data = json.loads(f.read_text())
+            # 按使用次数排序
+            skills = data.get("skills_used", {})
+            if skills:
+                sorted_skills = sorted(skills.items(), key=lambda x: x[1], reverse=True)
+                return dict(sorted_skills[:100])  # top 100
+    except:
+        pass
+    return {}
+
+
 # ── File iteration ────────────────────────────────────────────────────────
 
 

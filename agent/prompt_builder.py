@@ -755,22 +755,46 @@ def build_skills_system_prompt(
         result = ""
     else:
         index_lines = []
+        
+        # 获取使用频率top技能，优先显示
+        from agent.skill_utils import get_skill_usage_stats
+        top_skills = get_skill_usage_stats()  # {name: count}
+        
+        # 按类别组织技能
         for category in sorted(skills_by_category.keys()):
             cat_desc = category_descriptions.get(category, "")
             if cat_desc:
                 index_lines.append(f"  {category}: {cat_desc}")
             else:
                 index_lines.append(f"  {category}:")
-            # Deduplicate and sort skills within each category
+            
+            # 收集该类别技能
+            cat_skills = []
             seen = set()
             for name, desc in sorted(skills_by_category[category], key=lambda x: x[0]):
                 if name in seen:
                     continue
                 seen.add(name)
+                # 按使用频率排序，无统计的排最后
+                score = top_skills.get(name, 0)
+                cat_skills.append((name, desc, score))
+            
+            # 按频率排序，限制top-50技能总数
+            cat_skills.sort(key=lambda x: x[2], reverse=True)
+            shown = 0
+            for name, desc, score in cat_skills:
+                if shown >= 3:  # 每类别最多3个（总计~50个类别）
+                    break
                 if desc:
                     index_lines.append(f"    - {name}: {desc}")
                 else:
                     index_lines.append(f"    - {name}")
+                shown += 1
+        
+        # 如果技能太多，追加提示可动态加载
+        total_count = sum(len(skills) for skills in skills_by_category.values())
+        if total_count > 50:
+            index_lines.append(f"\n  [+ {total_count - 50} more skills — use skill_view(name) to load specific ones]")
 
         result = (
             "## Skills (mandatory)\n"

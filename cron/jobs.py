@@ -259,6 +259,10 @@ def _compute_grace_seconds(schedule: dict) -> int:
     MIN_GRACE = 120
     MAX_GRACE = 7200  # 2 hours
 
+    # Handle legacy string format: skip grace computation
+    if not isinstance(schedule, dict):
+        return MIN_GRACE
+
     kind = schedule.get("kind")
 
     if kind == "interval":
@@ -642,7 +646,10 @@ def advance_next_run(job_id: str) -> bool:
     jobs = load_jobs()
     for job in jobs:
         if job["id"] == job_id:
-            kind = job.get("schedule", {}).get("kind")
+            schedule = job.get("schedule", {})
+            if not isinstance(schedule, dict):
+                return False
+            kind = schedule.get("kind")
             if kind not in ("cron", "interval"):
                 return False
             now = _hermes_now().isoformat()
@@ -699,7 +706,11 @@ def get_due_jobs() -> List[Dict[str, Any]]:
         next_run_dt = _ensure_aware(datetime.fromisoformat(next_run))
         if next_run_dt <= now:
             schedule = job.get("schedule", {})
-            kind = schedule.get("kind")
+            # Handle legacy string format (e.g. "0 9 * * *") vs new dict format
+            if isinstance(schedule, str):
+                kind = None  # Legacy format -- skip stale-job detection
+            else:
+                kind = schedule.get("kind") if isinstance(schedule, dict) else None
 
             # For recurring jobs, check if the scheduled time is stale
             # (gateway was down and missed the window). Fast-forward to

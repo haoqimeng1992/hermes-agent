@@ -104,6 +104,7 @@ from gateway.platforms.base import (
     cache_image_from_url,
     cache_audio_from_bytes,
     cache_image_from_bytes,
+    utf16_len,
 )
 from gateway.status import acquire_scoped_lock, release_scoped_lock
 from hermes_constants import get_hermes_home
@@ -149,7 +150,7 @@ _FEISHU_DOC_UPLOAD_TYPES = {
 
 _MAX_TEXT_INJECT_BYTES = 100 * 1024
 _FEISHU_CONNECT_ATTEMPTS = 3
-_FEISHU_SEND_ATTEMPTS = 3
+_FEISHU_SEND_ATTEMPTS = 5  # More attempts to survive SSL turbulence
 _FEISHU_APP_LOCK_SCOPE = "feishu-app-id"
 _DEFAULT_TEXT_BATCH_DELAY_SECONDS = 0.6
 _DEFAULT_TEXT_BATCH_MAX_MESSAGES = 8
@@ -1042,7 +1043,7 @@ def check_feishu_requirements() -> bool:
 class FeishuAdapter(BasePlatformAdapter):
     """Feishu/Lark bot adapter."""
 
-    MAX_MESSAGE_LENGTH = 8000
+    MAX_MESSAGE_LENGTH = 4500
     # Threshold for detecting Feishu client-side message splits.
     # When a chunk is near the ~4096-char practical limit, a continuation
     # is almost certain.
@@ -1220,6 +1221,7 @@ class FeishuAdapter(BasePlatformAdapter):
             .register_p2_im_chat_member_bot_added_v1(self._on_bot_added_to_chat)
             .register_p2_im_chat_member_bot_deleted_v1(self._on_bot_removed_from_chat)
             .register_p2_im_chat_access_event_bot_p2p_chat_entered_v1(self._on_bot_p2p_chat_entered)
+            .register_p2_im_message_recalled_v1(self._on_message_recalled)
             .build()
         )
 
@@ -1365,7 +1367,11 @@ class FeishuAdapter(BasePlatformAdapter):
         last_response = None
 
         try:
-            for chunk in chunks:
+            for idx, chunk in enumerate(chunks):
+                # Delay between chunks to let SSL/TLS session recover.
+                # This is the single most effective fix for "record layer failure" errors.
+                if idx > 0:
+                    await asyncio.sleep(2.0)
                 msg_type, payload = self._build_outbound_payload(chunk)
                 try:
                     response = await self._feishu_send_with_retry(
@@ -1753,6 +1759,18 @@ class FeishuAdapter(BasePlatformAdapter):
         """Feishu text messages are plain text by default."""
         return content.strip()
 
+    @staticmethod
+    def truncate_message(
+        content: str,
+        max_length: int = 7990,
+        len_fn: Optional["Callable[[str], int]"] = None,
+    ) -> List[str]:
+        """
+        Override truncate_message to use UTF-16 length (Feishu API limit in code-units).
+        Feishu caps post/text payloads at 8000 UTF-16 code units.
+        """
+        return BasePlatformAdapter.truncate_message(content, max_length=max_length, len_fn=utf16_len)
+
     # =========================================================================
     # Inbound event handlers
     # =========================================================================
@@ -1826,6 +1844,12 @@ class FeishuAdapter(BasePlatformAdapter):
         event = getattr(data, "event", None)
         chat_id = str(getattr(event, "chat_id", "") or "")
         logger.debug("[Feishu] Bot P2P chat entered: %s", chat_id)
+
+    def _on_message_recalled(self, data: Any) -> None:
+        """Handle message recall events — just ack, no action needed."""
+        event = getattr(data, "event", None)
+        message_id = str(getattr(event, "message_id", "") or "")
+        logger.debug("[Feishu] Message recalled: %s", message_id)
 
     def _on_reaction_event(self, event_type: str, data: Any) -> None:
         """Route user reactions on bot messages as synthetic text events."""
@@ -3458,15 +3482,25 @@ class FeishuAdapter(BasePlatformAdapter):
                 last_error = exc
                 if msg_type == "post" and _POST_CONTENT_INVALID_RE.search(str(exc)):
                     raise
+                # Detect SSL errors — use longer backoff to let connection recover
+                is_ssl_error = isinstance(exc, OSError) and (
+                    "SSL" in str(exc) or "ssl" in str(exc) or "TLS" in str(exc)
+                    or "ConnectionReset" in str(exc) or "ConnectionAborted" in str(exc)
+                )
+                wait_seconds = 2 ** (attempt + 1)  # 2s, 4s, 8s, 16s, 32s
+                if attempt == 0 and is_ssl_error:
+                    # On first SSL failure, wait 2s immediately to let TLS session recover
+                    # before retrying — much more effective than jumping straight to 2s backoff
+                    await asyncio.sleep(2.0)
                 if attempt >= _FEISHU_SEND_ATTEMPTS - 1:
                     raise
-                wait_seconds = 2 ** attempt
                 logger.warning(
-                    "[Feishu] Send attempt %d/%d failed for chat %s; retrying in %ds: %s",
+                    "[Feishu] Send attempt %d/%d failed for chat %s; retrying in %ds (ssl=%s): %s",
                     attempt + 1,
                     _FEISHU_SEND_ATTEMPTS,
                     chat_id,
                     wait_seconds,
+                    is_ssl_error,
                     exc,
                 )
                 await asyncio.sleep(wait_seconds)

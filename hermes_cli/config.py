@@ -319,6 +319,8 @@ DEFAULT_CONFIG = {
     "toolsets": ["hermes-cli"],
     "agent": {
         "max_turns": 90,
+        # Enable tiered/layered memory system (core + L1/L2/L3 archive layers)
+        "memory_tier_enabled": True,
         # Inactivity timeout for gateway agent execution (seconds).
         # The agent can run indefinitely as long as it's actively calling
         # tools or receiving API responses.  Only fires when the agent has
