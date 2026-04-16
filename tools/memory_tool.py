@@ -121,17 +121,46 @@ class MemoryStore:
         # Frozen snapshot for system prompt -- set once at load_from_disk()
         self._system_prompt_snapshot: Dict[str, str] = {"memory": "", "user": ""}
 
-    def load_from_disk(self):
-        """Load entries from MEMORY.md and USER.md, capture system prompt snapshot."""
-        mem_dir = get_memory_dir()
-        mem_dir.mkdir(parents=True, exist_ok=True)
+    def load_from_disk(self, tier_enabled: bool = False):
+        """Load entries from MEMORY.md and USER.md, capture system prompt snapshot.
 
-        self.memory_entries = self._read_file(mem_dir / "MEMORY.md")
-        self.user_entries = self._read_file(mem_dir / "USER.md")
+        Args:
+            tier_enabled: If True, use LivingMemoryLoader for tiered core memory loading.
+        """
+        self._tier_enabled = tier_enabled
 
-        # Deduplicate entries (preserves order, keeps first occurrence)
-        self.memory_entries = list(dict.fromkeys(self.memory_entries))
-        self.user_entries = list(dict.fromkeys(self.user_entries))
+        if tier_enabled:
+            try:
+                from pathlib import Path
+                import sys
+                HYBRID_INDEX_DIR = Path.home() / ".hermes/knowledge/hybrid-index"
+                sys.path.insert(0, str(HYBRID_INDEX_DIR))
+                from living_memory_loader import LivingMemoryLoader
+                self._tier_loader = LivingMemoryLoader()
+                core_memory = self._tier_loader.get_core_memory()
+                if core_memory and core_memory.strip():
+                    core_lines = core_memory.split("\n")
+                    current_entry = []
+                    for line in core_lines:
+                        if line.startswith("## "):
+                            continue
+                        current_entry.append(line)
+                    self.memory_entries = [e.strip() for e in "\n".join(current_entry).split("§") if e.strip()]
+            except Exception as e:
+                import sys
+                print(f"[MemoryStore] tier loading failed: {e}", file=sys.stderr)
+                self._tier_loader = None
+
+        if not self._tier_loader:
+            # Legacy direct file loading
+            mem_dir = get_memory_dir()
+            mem_dir.mkdir(parents=True, exist_ok=True)
+            self.memory_entries = self._read_file(mem_dir / "MEMORY.md")
+            self.user_entries = self._read_file(mem_dir / "USER.md")
+
+            # Deduplicate entries (preserves order, keeps first occurrence)
+            self.memory_entries = list(dict.fromkeys(self.memory_entries))
+            self.user_entries = list(dict.fromkeys(self.user_entries))
 
         # Capture frozen snapshot for system prompt injection
         self._system_prompt_snapshot = {
