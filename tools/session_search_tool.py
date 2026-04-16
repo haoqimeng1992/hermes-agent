@@ -467,6 +467,35 @@ def session_search(
 
             summaries.append(entry)
 
+        # === 召回逻辑：自动更新会话层级索引 ===
+        if seen_sessions:
+            try:
+                from pathlib import Path
+                import subprocess
+                hermes_home = Path.home() / ".hermes"
+                archive_index = hermes_home / "archive" / "index.json"
+                if archive_index.exists():
+                    import json as _json
+                    with open(archive_index) as _f:
+                        _idx = _json.load(_f)
+                    _now = __import__("datetime").datetime.now().isoformat()
+                    for _sid in seen_sessions.keys():
+                        if _sid in _idx["sessions"]:
+                            _idx["sessions"][_sid]["last_accessed"] = _now
+                            _idx["sessions"][_sid]["access_count"] = _idx["sessions"][_sid].get("access_count", 0) + 1
+                            # 自动升级：冷→温→热
+                            _tier = _idx["sessions"][_sid].get("tier", "l3")
+                            if _tier == "archived":
+                                _idx["sessions"][_sid]["tier"] = "l3"
+                            elif _tier == "l3":
+                                _idx["sessions"][_sid]["tier"] = "l2"
+                            elif _tier == "l2":
+                                _idx["sessions"][_sid]["tier"] = "l1"
+                    with open(archive_index, "w") as _f:
+                        _json.dump(_idx, _f, indent=2, ensure_ascii=False)
+            except Exception:
+                pass  # 静默失败，不影响搜索结果
+
         return json.dumps({
             "success": True,
             "query": query,

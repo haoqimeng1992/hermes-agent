@@ -120,24 +120,87 @@ class MemoryStore:
         self.user_char_limit = user_char_limit
         # Frozen snapshot for system prompt -- set once at load_from_disk()
         self._system_prompt_snapshot: Dict[str, str] = {"memory": "", "user": ""}
+        # Tiered memory loader for hierarchical memory management
+        self._tier_loader = None
+        self._tier_enabled = False
 
-    def load_from_disk(self):
-        """Load entries from MEMORY.md and USER.md, capture system prompt snapshot."""
-        mem_dir = get_memory_dir()
-        mem_dir.mkdir(parents=True, exist_ok=True)
+    def load_from_disk(self, tier_enabled: bool = False):
+        """Load entries from MEMORY.md and USER.md, capture system prompt snapshot.
 
-        self.memory_entries = self._read_file(mem_dir / "MEMORY.md")
-        self.user_entries = self._read_file(mem_dir / "USER.md")
+        Args:
+            tier_enabled: If True, use LivingMemoryLoader for tiered core memory loading.
+        """
+        self._tier_enabled = tier_enabled
 
-        # Deduplicate entries (preserves order, keeps first occurrence)
-        self.memory_entries = list(dict.fromkeys(self.memory_entries))
-        self.user_entries = list(dict.fromkeys(self.user_entries))
+        if tier_enabled:
+            try:
+                from pathlib import Path
+                import sys
+                HYBRID_INDEX_DIR = Path.home() / ".hermes/knowledge/hybrid-index"
+                sys.path.insert(0, str(HYBRID_INDEX_DIR))
+                from living_memory_loader import LivingMemoryLoader
+                self._tier_loader = LivingMemoryLoader()
+                # Load core memory via tiered loader (respects CORE_MEMORY_CHARS limit)
+                core_memory = self._tier_loader.get_core_memory()
+                if core_memory and core_memory.strip():
+                    # Parse core memory into entries for backward compatibility
+                    core_lines = core_memory.split("\n")
+                    current_entry = []
+                    for line in core_lines:
+                        if line.startswith("## "):
+                            continue  # Skip section headers
+                        current_entry.append(line)
+                    # Rebuild entries, stripping empty ones
+                    self.memory_entries = [e.strip() for e in "\n".join(current_entry).split("§") if e.strip()]
+            except Exception as e:
+                import sys
+                print(f"[MemoryStore] tier loading failed: {e}", file=sys.stderr)
+                self._tier_loader = None
+
+        if not self._tier_loader:
+            # Legacy direct file loading
+            mem_dir = get_memory_dir()
+            mem_dir.mkdir(parents=True, exist_ok=True)
+            self.memory_entries = self._read_file(mem_dir / "MEMORY.md")
+            self.user_entries = self._read_file(mem_dir / "USER.md")
+
+            # Deduplicate entries (preserves order, keeps first occurrence)
+            self.memory_entries = list(dict.fromkeys(self.memory_entries))
+            self.user_entries = list(dict.fromkeys(self.user_entries))
 
         # Capture frozen snapshot for system prompt injection
         self._system_prompt_snapshot = {
             "memory": self._render_block("memory", self.memory_entries),
             "user": self._render_block("user", self.user_entries),
         }
+
+    def recall_memory(self, query: str, top_k: int = 3) -> List[Dict]:
+        """Recall relevant memories from tiered storage by query.
+
+        Uses LivingMemoryLoader.recall_by_index() to retrieve indexed entries
+        from archive layers (L1/L2/L3) on demand.
+
+        Args:
+            query: Search query string
+            top_k: Maximum number of results to return (default 3)
+
+        Returns:
+            List of dicts with entry_id, preview, source, tier, access_count
+        """
+        if not self._tier_loader:
+            return []
+        try:
+            return self._tier_loader.recall_by_index(query, top_k=top_k)
+        except Exception:
+            return []
+
+    def _try_consolidate(self):
+        """Call LivingMemoryLoader.consolidate_if_needed() if tier system is active."""
+        if self._tier_loader and self._tier_enabled:
+            try:
+                self._tier_loader.consolidate_if_needed()
+            except Exception:
+                pass
 
     @staticmethod
     @contextmanager
@@ -262,6 +325,9 @@ class MemoryStore:
             self._set_entries(target, entries)
             self.save_to_disk(target)
 
+        # Trigger tiered consolidation check after mutation
+        self._try_consolidate()
+
         return self._success_response(target, "Entry added.")
 
     def replace(self, target: str, old_text: str, new_content: str) -> Dict[str, Any]:
@@ -319,6 +385,9 @@ class MemoryStore:
             entries[idx] = new_content
             self._set_entries(target, entries)
             self.save_to_disk(target)
+
+        # Trigger tiered consolidation check after mutation
+        self._try_consolidate()
 
         return self._success_response(target, "Entry replaced.")
 
